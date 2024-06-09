@@ -294,6 +294,103 @@ def inference_multi_modality_detector(model: nn.Module,
         return results[0], data[0]
     else:
         return results, data
+    
+    
+def inference_multi_modality_detector_online(model: nn.Module,
+                                    pcds: Union[str, Sequence[str]],
+                                    imgs: Union[str, Sequence[str]],
+                                    data_info: dict,
+                                    test_pipeline: Optional[Compose] = None):
+    """Inference point cloud with the multi-modality detector. Now we only
+    support multi-modality detector for KITTI and SUNRGBD datasets since the
+    multi-view image loading is not supported yet in this inference function.
+
+    Args:
+        model (nn.Module): The loaded detector.
+        pcds (str, Sequence[str]):
+            Either point cloud files or loaded point cloud.
+        imgs (str, Sequence[str]):
+           Either image files or loaded images.
+        ann_file (str, Sequence[str]): Annotation files.
+        cam_type (str): Image of Camera chose to infer. When detector only uses
+            single-view image, we need to specify a camera view. For kitti
+            dataset, it should be 'CAM2'. For sunrgbd, it should be 'CAM0'.
+            When detector uses multi-view images, we should set it to 'all'.
+
+    Returns:
+        :obj:`Det3DDataSample` or list[:obj:`Det3DDataSample`]:
+        If pcds is a list or tuple, the same length list type results
+        will be returned, otherwise return the detection results directly.
+    """
+    if isinstance(pcds, (list, tuple)):
+        is_batch = True
+        assert isinstance(imgs, (list, tuple))
+        assert len(pcds) == len(imgs)
+    else:
+        pcds = [pcds]
+        imgs = [imgs]
+        is_batch = False
+
+    cfg = model.cfg
+
+
+    if not isinstance(pcds[0], str):
+        cfg = cfg.copy()
+        # set loading pipeline type
+        cfg.test_dataloader.dataset.pipeline[0].type = 'LoadPointsFromDict'
+
+    if isinstance(imgs[0], np.ndarray):
+        cfg = cfg.copy()
+        cfg.test_dataloader.dataset.pipeline[1].type = 'LoadImageFromNDArrayOnline'
+
+    # build the data pipeline
+    test_pipeline = deepcopy(cfg.test_dataloader.dataset.pipeline)
+    test_pipeline = Compose(test_pipeline)
+    box_type_3d, box_mode_3d = get_box_type(cfg.test_dataloader.dataset.box_type_3d)
+
+    #data_list = mmengine.load(ann_file)['data_list']
+
+    data = []
+    for index, pcd in enumerate(pcds):
+        # get data info containing calib
+        img = imgs[index]
+
+        data_info['images']['img_path'] = img
+        mono_img_info = {f'online': data_info['images']}
+        data_ = dict(
+                points=pcd,
+                images=mono_img_info,
+                box_type_3d=box_type_3d,
+                box_mode_3d=box_mode_3d)
+        if 'cam2img' in data_info['images']:
+            # The data annotation in SRUNRGBD dataset does not contain
+            # `cam2img`
+            data_['cam2img'] = np.array(
+                data_info['images']['cam2img'])
+                
+        # LiDAR to image conversion for KITTI dataset
+        if box_mode_3d == Box3DMode.LIDAR:
+            if 'lidar2img' in data_info['images']:
+                data_['lidar2img'] = np.array(
+                    data_info['images']['lidar2img'])
+
+        if 'timestamp' in data_info:
+            # Using multi-sweeps need `timestamp`
+            data_['timestamp'] = data_info['timestamp']
+
+        data_ = test_pipeline(data_)
+        data.append(data_)
+
+    collate_data = pseudo_collate(data)
+
+    # forward the model
+    with torch.no_grad():
+        results = model.test_step(collate_data)
+
+    if not is_batch:
+        return results[0], data[0]
+    else:
+        return results, data
 
 
 def inference_mono_3d_detector(model: nn.Module,
@@ -350,6 +447,174 @@ def inference_mono_3d_detector(model: nn.Module,
             images=mono_img_info,
             box_type_3d=box_type_3d,
             box_mode_3d=box_mode_3d)
+
+        data_ = test_pipeline(data_)
+        data.append(data_)
+
+    collate_data = pseudo_collate(data)
+
+    # forward the model
+    with torch.no_grad():
+        results = model.test_step(collate_data)
+
+    if not is_batch:
+        return results[0]
+    else:
+        return results
+
+
+def inference_mono_3d_detector_online(model: nn.Module,
+                               imgs: ImagesType,
+                               ann_file: Union[str, Sequence[str]],
+                               test_pipeline: Optional[Compose] = None):
+    """Inference image with the monocular 3D detector.
+
+    Args:
+        model (nn.Module): The loaded detector.
+        imgs (str, Sequence[str]):
+           Either image files or loaded images.
+        ann_files (str, Sequence[str]): Annotation files.
+        cam_type (str): Image of Camera chose to infer.
+            For kitti dataset, it should be 'CAM_2',
+            and for nuscenes dataset, it should be
+            'CAM_FRONT'. Defaults to 'CAM_FRONT'.
+
+    Returns:
+        :obj:`Det3DDataSample` or list[:obj:`Det3DDataSample`]:
+        If pcds is a list or tuple, the same length list type results
+        will be returned, otherwise return the detection results directly.
+    """
+    if isinstance(imgs, (list, tuple)):
+        is_batch = True
+    else:
+        imgs = [imgs]
+        is_batch = False
+
+    cfg = model.cfg
+
+    # build the data pipeline
+    if test_pipeline is None:
+        test_pipeline = deepcopy(cfg.test_dataloader.dataset.pipeline)
+        if isinstance(imgs[0], np.ndarray):
+            test_pipeline[0].type = 'LoadImageFromNDArrayOnline'
+        test_pipeline = Compose(test_pipeline)
+        
+        
+    box_type_3d, box_mode_3d = get_box_type(cfg.test_dataloader.dataset.box_type_3d)
+
+
+    data_list = mmengine.load(ann_file)['data_list']
+    assert len(imgs) == len(data_list)
+
+    data = []
+    for index, img in enumerate(imgs):
+        if isinstance(img, np.ndarray):
+            # data_=dict(
+            #     images=img,
+            #     box_type_3d=box_type_3d,
+            #     box_mode_3d=box_mode_3d)
+            data_info = data_list[index]
+            data_info['images']['img_path'] = img
+            mono_img_info = {f'online': data_info['images']}
+            data_=dict(
+                images=mono_img_info,
+                box_type_3d=box_type_3d,
+                box_mode_3d=box_mode_3d)
+        else:
+            # get data info containing calib
+            data_info = data_list[index]
+            img_path = data_info['images']['img_path']
+            #if osp.basename(img_path) != osp.basename(img):
+            #    raise ValueError(f'the info file of {img_path} is not provided.')
+
+            # replace the img_path in data_info with img
+            data_info['images']['img_path'] = img
+            # avoid data_info['images'] has multiple keys anout camera views.
+            mono_img_info = {f'online': data_info['images']}
+            data_ = dict(
+                images=mono_img_info,
+                box_type_3d=box_type_3d,
+                box_mode_3d=box_mode_3d)
+
+        data_ = test_pipeline(data_)
+        data.append(data_)
+
+    collate_data = pseudo_collate(data)
+
+    # forward the model
+    with torch.no_grad():
+        results = model.test_step(collate_data)
+
+    if not is_batch:
+        return results[0]
+    else:
+        return results
+    
+def inference_mono_3d_detector_online_simple(model: nn.Module,
+                               imgs: ImagesType,
+                               data_info: dict,
+                               test_pipeline: Optional[Compose] = None):
+    """Inference image with the monocular 3D detector.
+
+    Args:
+        model (nn.Module): The loaded detector.
+        imgs (str, Sequence[str]):
+           Either image files or loaded images.
+        ann_files (str, Sequence[str]): Annotation files.
+        cam_type (str): Image of Camera chose to infer.
+            For kitti dataset, it should be 'CAM_2',
+            and for nuscenes dataset, it should be
+            'CAM_FRONT'. Defaults to 'CAM_FRONT'.
+
+    Returns:
+        :obj:`Det3DDataSample` or list[:obj:`Det3DDataSample`]:
+        If pcds is a list or tuple, the same length list type results
+        will be returned, otherwise return the detection results directly.
+    """
+    if isinstance(imgs, (list, tuple)):
+        is_batch = True
+    else:
+        imgs = [imgs]
+        is_batch = False
+
+    cfg = model.cfg
+
+    # build the data pipeline
+    # if test_pipeline is None:
+    #     test_pipeline = deepcopy(cfg.test_dataloader.dataset.pipeline)
+    #     if isinstance(imgs[0], np.ndarray):
+    #         test_pipeline[0].type = 'LoadImageFromNDArray'
+    #     test_pipeline = Compose(test_pipeline)
+        
+        
+    box_type_3d, box_mode_3d = get_box_type(cfg.test_dataloader.dataset.box_type_3d)
+
+    data = []
+    for index, img in enumerate(imgs):
+        if isinstance(img, np.ndarray):
+            # data_=dict(
+            #     images=img,
+            #     box_type_3d=box_type_3d,
+            #     box_mode_3d=box_mode_3d)
+            data_info['images']['img_path'] = img
+            mono_img_info = {f'online': data_info['images']}
+            data_=dict(
+                images=mono_img_info,
+                box_type_3d=box_type_3d,
+                box_mode_3d=box_mode_3d)
+        else:
+            # get data info containing calib
+            #if osp.basename(img_path) != osp.basename(img):
+            #    raise ValueError(f'the info file of {img_path} is not provided.')
+
+            # replace the img_path in data_info with img
+            data_info['images']['img_path'] = img
+            # avoid data_info['images'] has multiple keys anout camera views.
+            mono_img_info = {f'online': data_info['images']}
+            data_ = dict(
+                images=mono_img_info,
+                box_type_3d=box_type_3d,
+                box_mode_3d=box_mode_3d)
 
         data_ = test_pipeline(data_)
         data.append(data_)
