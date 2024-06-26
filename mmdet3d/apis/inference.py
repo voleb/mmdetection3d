@@ -466,7 +466,7 @@ def inference_mono_3d_detector(model: nn.Module,
 def inference_mono_3d_detector_online(model: nn.Module,
                                imgs: ImagesType,
                                ann_file: Union[str, Sequence[str]],
-                               test_pipeline: Optional[Compose] = None):
+                               cam_type: str = 'CAM_FRONT'):
     """Inference image with the monocular 3D detector.
 
     Args:
@@ -493,30 +493,25 @@ def inference_mono_3d_detector_online(model: nn.Module,
     cfg = model.cfg
 
     # build the data pipeline
-    if test_pipeline is None:
-        test_pipeline = deepcopy(cfg.test_dataloader.dataset.pipeline)
-        if isinstance(imgs[0], np.ndarray):
-            test_pipeline[0].type = 'LoadImageFromNDArrayOnline'
-        test_pipeline = Compose(test_pipeline)
+    test_pipeline = deepcopy(cfg.test_dataloader.dataset.pipeline)
+    if isinstance(imgs[0], np.ndarray):
+        test_pipeline[0].type = 'LoadImageFromNDArrayStream'
+    test_pipeline = Compose(test_pipeline)
         
         
     box_type_3d, box_mode_3d = get_box_type(cfg.test_dataloader.dataset.box_type_3d)
 
 
     data_list = mmengine.load(ann_file)['data_list']
-    assert len(imgs) == len(data_list)
+    #assert len(imgs) == len(data_list)
 
     data = []
     for index, img in enumerate(imgs):
         if isinstance(img, np.ndarray):
-            # data_=dict(
-            #     images=img,
-            #     box_type_3d=box_type_3d,
-            #     box_mode_3d=box_mode_3d)
             data_info = data_list[index]
-            data_info['images']['img_path'] = img
-            mono_img_info = {f'online': data_info['images']}
+            mono_img_info = {f'{cam_type}': data_info['images'][cam_type]}
             data_=dict(
+                img = img,
                 images=mono_img_info,
                 box_type_3d=box_type_3d,
                 box_mode_3d=box_mode_3d)
